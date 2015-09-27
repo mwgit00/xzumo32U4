@@ -9,4 +9,4 @@ If I write an interesting sketch for it, I'll put it here.  Current sketches:
 
 spintrak - Spins robot to face an object.
 
-hillroam - Tries to avoid venturing anywhere that semms too steep.
+hillroam - Tries to avoid venturing anywhere that seems too steep.
