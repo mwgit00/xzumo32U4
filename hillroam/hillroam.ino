@@ -146,11 +146,39 @@ void test_acc()
 
 
 
-#define K_ROAM_RATE 9
+#define K_RAMP_SAMPLES 11
 
-// acceleration scale factors for ramping velocity
-// 0, 0, 0.33*Vel, 0.5*Vel, Vel, 0.5*Vel, 0.33*Vel, 0, 0
-int16_t k_acc_fac[K_ROAM_RATE] = {500,500,3,2,1,2,3,500,500};
+// motors go in short bursts (ramps)
+// acceleration scale factors ramp the velocity
+// scale factor is 0-1 with a 10x multiplier in table
+int16_t k_acc_fac[K_RAMP_SAMPLES] = {0,3,7,10,7,3,0,0,0,0,0};
+
+uint8_t k_ramp = 0;
+int16_t k_toggle = 0;
+
+void ramp_motors(int16_t vmax)
+{
+  // k_toggle is 1 or 0 so one motor is always off
+  // then apply velocity ramp factors
+  int16_t v1 = (1 - k_toggle) * vmax;
+  int16_t v2 = k_toggle * vmax;
+  int16_t fac = k_acc_fac[k_ramp];
+  motors.setSpeeds((v1 * fac) / 10, (v2 * fac) / 10);
+
+  // toggle the active motor when count rolls over
+  k_ramp++;
+  if (k_ramp == K_RAMP_SAMPLES)
+  {
+    k_ramp = 0;
+    k_toggle = 1 - k_toggle;  // toggle
+  }
+}
+
+
+
+const uint8_t E_FLAT = 0;
+const uint8_t E_DOWN = 1;
+const uint8_t E_SPIN = 2;
 
 void roam()
 {
@@ -158,16 +186,16 @@ void roam()
   lcd.print("Roaming!");
   delay(500);
 
-  int16_t vtog = 100;
-  int16_t v = 100;
-  int16_t v1 = v + vtog;
-  int16_t v2 = v - vtog;
-  uint8_t k = 0;
-  
+  uint8_t state = E_FLAT;
+  int16_t vmax = 200;
+  int16_t vspin = 200;
   ledGreen(1);
 
   while (1)
   {
+    // this paces everything
+    delay(K_DELAY);
+    
     // read sensors and apply calibration offsets
     // then update median filters
     compass.read();
@@ -176,72 +204,64 @@ void roam()
     int16_t med_x = buff_update_med(acc_x_max, &acc_x_max_i, diff_x);
     int16_t med_y = buff_update_med(acc_y_max, &acc_y_max_i, diff_y);
 
-    if (med_x < -2000)
+    switch (state)
     {
-      ledGreen(0);
-      ledRed(1);
-      
-      // robot started going downhill
-      // so immediately go into reverse to decrease X tilt
-      // keep going in reverse until tilt is reduced
-      // or iteration limit is reached
-      motors.setSpeeds(-v1 / 2, -v2 / 2);
-      int8_t n = 100;
-      while (n--)
-      {
-        delay(K_DELAY);
-        compass.read();
-        diff_x = compass.a.x - acc_x_level;
-        diff_y = compass.a.y - acc_y_level;
-        med_x = buff_update_med(acc_x_max, &acc_x_max_i, diff_x);
-        med_y = buff_update_med(acc_y_max, &acc_y_max_i, diff_y);
-        if (med_x > -1500)
+      case E_FLAT:
+        // normal flat motion moving one motor at a time
+        ramp_motors(vmax);
+        if (med_x < -3000)
         {
-          break;
+          // robot started pointing downhill
+          ledGreen(0);
+          ledRed(1);
+          state = E_DOWN;
         }
-      }
-
-      ledRed(0);
-      ledYellow(1);
-      
-      // now spin until pointing uphill again
-      // or iteration limit is reached      
-      motors.setSpeeds(-vtog, vtog);
-      n = 100;
-      while (n--)
-      {
-        delay(K_DELAY);
-        compass.read();
-        diff_x = compass.a.x - acc_x_level;
-        diff_y = compass.a.y - acc_y_level;
-        med_x = buff_update_med(acc_x_max, &acc_x_max_i, diff_x);
-        med_y = buff_update_med(acc_y_max, &acc_y_max_i, diff_y);
+        break;
+      case E_DOWN:
+        // continue ramping in reverse direction
+        // to undo whatever motion made robot point downhill
+        ramp_motors(-vmax);
+        if ((med_x > -1200) && (k_ramp == 0))
+        {
+          // robot has stopped its ramp motion
+          // and is not pointing downhill as much
+          // so spin to try to point uphill again
+          ledRed(0);
+          ledYellow(1);
+          delay(500);
+          // best direction for spin determined experimentally
+          if (k_toggle == 0)
+          {
+            vspin = vmax;
+          }
+          else
+          {
+            vspin = -vmax;
+          }
+          // start spinning
+          // the small delay afterwards may inhibit
+          // any accelerometer jumps caused by start of spin
+          motors.setSpeeds(vspin/2, -vspin/2);
+          delay(250);
+          state = E_SPIN;
+        }
+        break;
+      case E_SPIN:
+        // keep spinning until pointing uphill again
+        // TODO -- or iteration limit is reached ?
         if ((med_y < 500) && (med_y > -500) && (med_x > 0))
         {
-          break;
+          ledYellow(0);
+          ledGreen(1);
+          motors.setSpeeds(0, 0);
+          // let everything settle before resuming roam
+          delay(500);
+          state = E_FLAT;
         }
-      }
-
-      ledYellow(0);
-      ledGreen(1);
-      
-      // this will restart toggling logic below...
-      k = K_ROAM_RATE;
+        break;
+      default:
+        break;
     }
-
-    // toggle the motor speeds
-    // and apply velocity ramp factors
-    if (k >= K_ROAM_RATE)
-    {
-      k = 0;
-      vtog = -vtog;
-      v1 = v + vtog;
-      v2 = v - vtog;
-    }
-    motors.setSpeeds(v1 / k_acc_fac[k], v2 / k_acc_fac[k]);
-    k++;
-    
-    delay(K_DELAY);
   }
 }
 
