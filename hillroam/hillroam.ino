@@ -11,6 +11,7 @@ Zumo32U4LCD lcd;
 Zumo32U4ButtonA buttonA;
 Zumo32U4ButtonB buttonB;
 Zumo32U4Motors motors;
+Zumo32U4Encoders encoders;
 
 LSM303 compass;
 
@@ -75,28 +76,84 @@ void calib()
 
 
 //---------------------------------------------------
-// TEST MODE
+// SPEED CONTROL
 
-int8_t test_acc_justify(int16_t i)
+int16_t pre_err_r = 0;
+int16_t pre_err_l = 0;
+int16_t int_err_r = 0;
+int16_t int_err_l = 0;
+int16_t enc_r = 0;
+int16_t enc_l = 0;
+
+void reset_speed_control()
 {
+  motors.setSpeeds(0, 0);
+  int_err_r = 0;
+  int_err_l = 0;
+  enc_r = 0;
+  enc_l = 0;
+}
+
+void update_speed_control(int16_t vsetr, int16_t vsetl)
+{
+  const int16_t K_P = 1;
+  const int16_t K_I = 1;
+  const int16_t K_D = 0;  // TODO -- maybe get rid of all D stuff
+
+  // sense
+  enc_r = encoders.getCountsAndResetRight();
+  enc_l = encoders.getCountsAndResetLeft();
+
+  // update error terms
+  int16_t err_r = vsetr - enc_r;
+  int16_t err_l = vsetl - enc_l;
+  int16_t d_err_r = err_r - pre_err_r;
+  int16_t d_err_l = err_l - pre_err_l;
+  int_err_r += err_r;
+  int_err_l += err_l;
+
+  // calculate output to correct error
+  int16_t out_vr = K_P * err_r + K_I * int_err_r + K_D * d_err_r;
+  int16_t out_vl = K_P * err_l + K_I * int_err_l + K_D * d_err_l;
+
+  motors.setSpeeds(out_vl, out_vr);
+  
+  pre_err_r = err_r;
+  pre_err_l = err_l;
+}
+
+
+
+//---------------------------------------------------
+// TEST MODE FUNCTIONS
+
+int8_t right_justify_int(int16_t i, int16_t offset)
+{
+  // right justify 4-digit integer
+  // this is default position for single digit
   int8_t w = 3;
   int16_t abs_i = abs(i);
+  // scoot back one place if 2 digits
   if (abs_i >= 10) w--;
+  // scoot back one place if 3 digits
   if (abs_i >= 100) w--;
+  // scoot back one place if negative
   if (i < 0) w--;
-  return w;
+  return w + offset;
 }
 
 void test_acc()
 {
   lcd.clear();
   lcd.print("  AX  AY");
+  delay(500);
+  
   while (1)
   {
     compass.read();
     int16_t acc_x = compass.a.x - acc_x_level;
     int16_t acc_y = compass.a.y - acc_y_level;
-#if 0
+#if 1
     // full accelerometer data can be sent to serial monitor  
     int16_t acc_z = compass.a.z - acc_z_level;
     snprintf_P(report, sizeof(report),
@@ -108,47 +165,71 @@ void test_acc()
     acc_y = constrain(acc_y / 100, -99, 99);
     lcd.gotoXY(0, 1);
     lcd.print("        ");
-    lcd.gotoXY(0 + test_acc_justify(acc_x), 1);
+    lcd.gotoXY(right_justify_int(acc_x, 0), 1);
     lcd.print(acc_x);
-    lcd.gotoXY(4 + test_acc_justify(acc_y), 1);
+    lcd.gotoXY(right_justify_int(acc_y, 4), 1);
     lcd.print(acc_y);
-    delay(100);    
+    delay(100);
+    if (buttonB.getSingleDebouncedPress())
+    {
+      break;
+    }
+  }
+
+  while (!buttonB.getSingleDebouncedRelease())
+  {
+    // wait for release
+  }
+}
+
+void test_speed_control()
+{
+  int16_t vr;
+  int16_t vl;
+  int16_t v = 20;
+  int16_t k = 0;
+  
+  lcd.clear();
+  lcd.print("  VL  VR");
+  delay(500);
+
+  while (1)
+  {
+    // this paces everything
+    delay(K_DELAY);
+    update_speed_control(v, v);     
+
+    // toggle speed periodically
+    if (k == 0)
+    {
+      v = -v;
+      k = 200;
+    }
+    k--;
+    
+    lcd.gotoXY(0, 1);
+    lcd.print("        ");
+    lcd.gotoXY(right_justify_int(enc_l, 0), 1);
+    lcd.print(enc_l);
+    lcd.gotoXY(right_justify_int(enc_r, 4), 1);
+    lcd.print(enc_r);
+    if (buttonB.getSingleDebouncedPress())
+    {
+      break;
+    }
+  }
+
+  reset_speed_control();
+  while (!buttonB.getSingleDebouncedRelease())
+  {
+    // wait for release
   }
 }
 
 
 
 //---------------------------------------------------
-// MOTOR RAMPING
-
-#define K_RAMP_SAMPLES 11
-
-// motors go in short bursts (ramps)
-// acceleration scale factors ramp the velocity
-// scale factor is 0-1 with a 10x multiplier in table
-int16_t k_acc_fac[K_RAMP_SAMPLES] = {0,3,7,10,7,3,0,0,0,0,0};
-uint8_t k_ramp = 0;
-int16_t k_toggle = 0;
-
-void ramp_motors(int16_t vmax)
-{
-  // k_toggle is 1 or 0 so one motor is always off
-  // then apply velocity ramp factors
-  int16_t v1 = (1 - k_toggle) * vmax;
-  int16_t v2 = k_toggle * vmax;
-  int16_t fac = k_acc_fac[k_ramp];
-  motors.setSpeeds((v1 * fac) / 10, (v2 * fac) / 10);
-
-  // toggle the active motor when count rolls over
-  k_ramp++;
-  if (k_ramp == K_RAMP_SAMPLES)
-  {
-    k_ramp = 0;
-    k_toggle = 1 - k_toggle;  // toggle
-  }
-}
-
-
+// UTILITY FUNCTIONS
 
 // return true if expr is true for max counts
 bool is_ct_reached(bool expr, uint8_t* pct, uint8_t max)
@@ -175,26 +256,136 @@ bool is_ct_reached(bool expr, uint8_t* pct, uint8_t max)
 // ROAM MODE
 
 const uint8_t E_FLAT = 0;
-const uint8_t E_DOWN = 1;
+const uint8_t E_REVERSE = 1;
 const uint8_t E_SPIN = 2;
 
-const int16_t K_ACC_PT_DOWN = -3000;
+const int16_t K_TILT_DOWN = -2400;
+const int16_t K_TILT_UP = 2400;
+const int16_t K_BALANCE_X = 1200;
+const int16_t K_BALANCE_Y = 400;
 const uint8_t K_FLAT_CT = 3;
 const uint8_t K_DOWN_CT = 3;
-const uint8_t K_SPIN_CT = 3;
+const uint8_t K_SPIN_CT = 2;
 
 void roam()
 {
   uint8_t state = E_FLAT;
-  int16_t vmax = 200;
-  int16_t vspin = 200;
+  int16_t vmax = 15;
+  int16_t vspin = 0;
+  int16_t vl = vmax;
+  int16_t vr = vmax;
+  
   uint8_t ct = 0;
+  uint8_t ct1 = 0;
+  uint8_t ct2 = 0;
   bool flag = false;
+  bool flag1 = false;
+  bool flag2 = false;
 
   lcd.clear();
   lcd.print("Roaming!");
   ledGreen(1);
   delay(500);
+
+  while (1)
+  {
+    // this paces everything
+    delay(K_DELAY);
+
+    // apply whatever the latest settings are to PID loops
+    update_speed_control(vl, vr);
+    
+    // read sensors and apply calibration offsets
+    compass.read();
+    int16_t acc_x = compass.a.x - acc_x_level;
+    int16_t acc_y = compass.a.y - acc_y_level;
+
+    switch (state)
+    {
+      case E_FLAT:
+        // check if robot started pointing downhill or uphill
+        flag1 = is_ct_reached((acc_x < K_TILT_DOWN), &ct1, K_FLAT_CT);
+        flag2 = is_ct_reached((acc_x > K_TILT_UP), &ct2, K_FLAT_CT);        
+        if (flag1 || flag2)
+        {
+          vl = -vl;
+          vr = -vr;
+          state = E_REVERSE;
+          ledGreen(0);
+          ledRed(1);
+          ct1 = 0;
+          ct2 = 0;
+        }
+        break;
+      
+      case E_REVERSE:
+        // check if nearly flat again (balanced in X)
+        flag = ((acc_x > -K_BALANCE_X) && (acc_x < K_BALANCE_X));
+        if (is_ct_reached(flag, &ct, K_DOWN_CT))
+        {
+          // robot is not tilting as much
+          // so spin to try to point uphill again
+          ledRed(0);
+          ledYellow(1);
+          /*
+          if (acc_y < 0)
+          {
+            vspin = -vmax;
+          }
+          else
+          {
+            vspin = vmax;
+          }
+
+          // start spinning
+          // the small delay afterwards may inhibit
+          // any accelerometer jumps caused by start of spin
+          vl = vspin;
+          vr = -vspin;
+          state = E_SPIN;
+          */
+          vl = -vl;
+          vr = -vr;
+          state = E_FLAT;
+          ct = 0;
+        }
+        break;
+      
+      case E_SPIN:
+        // keep spinning until Y is nearly balanced
+        // and see if tilt on X is reversed
+        // TODO -- or iteration limit is reached ?
+        flag1 = ((acc_y < K_BALANCE_Y) && (acc_y > -K_BALANCE_Y));
+        flag2 = true;//(acc_x > 0);
+        flag = flag1 && flag2;
+        if (is_ct_reached(flag, &ct, K_SPIN_CT))
+        {
+          ledYellow(0);
+          ledGreen(1);
+          vl = vmax;
+          vr = vmax;
+          state = E_FLAT;
+          ct = 0;
+        }
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+
+void cruise()
+{
+  lcd.clear();
+  lcd.print("Cruise!");
+  ledGreen(1);
+  delay(500);
+
+  float roll = 0.0;
+  int16_t vmax = 100;
+  int16_t v1 = 0;
+  int16_t v2 = 0;
 
   while (1)
   {
@@ -207,70 +398,15 @@ void roam()
     int16_t acc_x = compass.a.x - acc_x_level;
     int16_t acc_y = compass.a.y - acc_y_level;
 
-    switch (state)
-    {
-      case E_FLAT:
-        // normal flat motion moving one motor at a time
-        ramp_motors(vmax);
-        flag = (acc_x < K_ACC_PT_DOWN);
-        if (is_ct_reached(flag, &ct, K_FLAT_CT))
-        {
-          // robot started pointing downhill
-          ledGreen(0);
-          ledRed(1);
-          state = E_DOWN;
-          ct = 0;
-        }
-        break;
-      case E_DOWN:
-        // continue ramping in reverse direction
-        // to undo whatever motion made robot point downhill
-        ramp_motors(-vmax);
-        flag = (acc_x > -1200);
-        if (is_ct_reached(flag, &ct, K_DOWN_CT) && (k_ramp == 0))
-        {
-          // robot has stopped its ramp motion
-          // and is not pointing downhill as much
-          // so spin to try to point uphill again
-          ledRed(0);
-          ledYellow(1);
-          delay(500);
-          // best direction for spin determined experimentally
-          if (k_toggle == 0)
-          {
-            vspin = vmax;
-          }
-          else
-          {
-            vspin = -vmax;
-          }
-          // start spinning
-          // the small delay afterwards may inhibit
-          // any accelerometer jumps caused by start of spin
-          motors.setSpeeds(vspin/2, -vspin/2);
-          delay(250);
-          state = E_SPIN;
-          ct = 0;
-        }
-        break;
-      case E_SPIN:
-        // keep spinning until pointing uphill again
-        // TODO -- or iteration limit is reached ?
-        flag = ((acc_y < 500) && (acc_y > -500) && (acc_x > 0));
-        if (is_ct_reached(flag, &ct, K_SPIN_CT))
-        {
-          ledYellow(0);
-          ledGreen(1);
-          motors.setSpeeds(0, 0);
-          // let everything settle before resuming roam
-          delay(500);
-          state = E_FLAT;
-          ct = 0;
-        }
-        break;
-      default:
-        break;
-    }
+    roll = float(acc_y) * 0.01;
+    v1 = constrain(vmax - int(roll), 0, vmax);
+    v2 = constrain(vmax + int(roll), 0, vmax);
+    motors.setSpeeds(v1, v2);
+          lcd.gotoXY(0, 1);
+          lcd.print("      ");
+          lcd.gotoXY(0, 1);
+          lcd.print(int(roll));
+    
   }
 }
 
@@ -341,11 +477,18 @@ void loop()
   calib();
   if (MODE == K_MODE_TEST)
   {
-    test_acc();
+    while (1)
+    {
+      // tests will cycle in infinite loop
+      // C button will cancel out of each test
+      test_acc();
+      test_speed_control();
+    }
   }
   else
   {
     roam();
+    //cruise();
   }
 }
 
