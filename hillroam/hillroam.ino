@@ -16,7 +16,7 @@ Zumo32U4Encoders encoders;
 LSM303 compass;
 
 
-#define K_DELAY 50  // sensor loop delay
+#define K_DELAY 50  // sensor loop delay (50ms)
 
 const uint8_t K_MODE_IDLE = 0;
 const uint8_t K_MODE_TEST = 1;
@@ -78,48 +78,50 @@ void calib()
 //---------------------------------------------------
 // SPEED CONTROL
 
-int16_t pre_err_r = 0;
 int16_t pre_err_l = 0;
-int16_t int_err_r = 0;
-int16_t int_err_l = 0;
-int16_t enc_r = 0;
+int16_t pre_err_r = 0;
 int16_t enc_l = 0;
+int16_t enc_r = 0;
+int16_t out_l = 0;
+int16_t out_r = 0;
 
 void reset_speed_control()
 {
   motors.setSpeeds(0, 0);
-  int_err_r = 0;
-  int_err_l = 0;
-  enc_r = 0;
+  pre_err_l = 0;
+  pre_err_r = 0;
   enc_l = 0;
+  enc_r = 0;
+  out_l = 0;
+  out_r = 0;
 }
 
-void update_speed_control(int16_t vsetr, int16_t vsetl)
+void update_speed_control(int16_t vsetl, int16_t vsetr)
 {
-  const int16_t K_P = 1;
-  const int16_t K_I = 1;
-  const int16_t K_D = 0;  // TODO -- maybe get rid of all D stuff
+  // use Proportional-Derivative control
+  // with limits on output
+  const int16_t LIMIT = 200;
+  const float K_P = 2.0;
+  const float K_D = 0.5;
 
-  // sense
-  enc_r = encoders.getCountsAndResetRight();
+  // get velocity feedback
   enc_l = encoders.getCountsAndResetLeft();
+  enc_r = encoders.getCountsAndResetRight();
 
   // update error terms
-  int16_t err_r = vsetr - enc_r;
   int16_t err_l = vsetl - enc_l;
-  int16_t d_err_r = err_r - pre_err_r;
+  int16_t err_r = vsetr - enc_r;
   int16_t d_err_l = err_l - pre_err_l;
-  int_err_r += err_r;
-  int_err_l += err_l;
+  int16_t d_err_r = err_r - pre_err_r;
 
-  // calculate output to correct error
-  int16_t out_vr = K_P * err_r + K_I * int_err_r + K_D * d_err_r;
-  int16_t out_vl = K_P * err_l + K_I * int_err_l + K_D * d_err_l;
+  // calculate CHANGE to output to correct speed error
+  out_l = constrain(out_l + (int)(K_P * err_l + K_D * d_err_l), -LIMIT, LIMIT);
+  out_r = constrain(out_r + (int)(K_P * err_r + K_D * d_err_r), -LIMIT, LIMIT);
+  motors.setSpeeds(out_l, out_r);
 
-  motors.setSpeeds(out_vl, out_vr);
-  
-  pre_err_r = err_r;
+  // update these for calculating error derivative on next pass
   pre_err_l = err_l;
+  pre_err_r = err_r;
 }
 
 
@@ -197,7 +199,6 @@ void test_speed_control()
   {
     // this paces everything
     delay(K_DELAY);
-    update_speed_control(v, v);     
 
     // toggle speed periodically
     if (k == 0)
@@ -206,6 +207,7 @@ void test_speed_control()
       k = 200;
     }
     k--;
+    update_speed_control(v, v);    
     
     lcd.gotoXY(0, 1);
     lcd.print("        ");
@@ -382,10 +384,10 @@ void cruise()
   ledGreen(1);
   delay(500);
 
-  float roll = 0.0;
-  int16_t vmax = 100;
-  int16_t v1 = 0;
-  int16_t v2 = 0;
+  int16_t roll = 0;
+  int16_t vmax = 25;
+  int16_t vl = 0;
+  int16_t vr = 0;
 
   while (1)
   {
@@ -398,15 +400,14 @@ void cruise()
     int16_t acc_x = compass.a.x - acc_x_level;
     int16_t acc_y = compass.a.y - acc_y_level;
 
-    roll = float(acc_y) * 0.01;
-    v1 = constrain(vmax - int(roll), 0, vmax);
-    v2 = constrain(vmax + int(roll), 0, vmax);
-    motors.setSpeeds(v1, v2);
-          lcd.gotoXY(0, 1);
-          lcd.print("      ");
-          lcd.gotoXY(0, 1);
-          lcd.print(int(roll));
-    
+    roll = (int)(acc_y * 0.01);
+    vl = constrain(vmax - roll, -vmax, vmax);
+    vr = constrain(vmax + roll, -vmax, vmax);
+    update_speed_control(vl, vr);
+    lcd.gotoXY(0, 1);
+    lcd.print("      ");
+    lcd.gotoXY(0, 1);
+    lcd.print(roll);
   }
 }
 
@@ -487,8 +488,8 @@ void loop()
   }
   else
   {
-    roam();
-    //cruise();
+    //roam();
+    cruise();
   }
 }
 
